@@ -2,7 +2,7 @@
 
 ## Objective
 
-Identify and report all Pull Requests across specified repositories where the authenticated user has performed a "DEV QA" or "QA" review.
+Identify and report all Pull Requests across specified repositories where the authenticated user has performed a "QA" review.
 
 ## Prerequisites
 
