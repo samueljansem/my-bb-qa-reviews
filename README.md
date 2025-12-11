@@ -9,7 +9,7 @@ Identify and report all Pull Requests across specified repositories where the au
 Environment variables must be configured:
 
 - `BITBUCKET_EMAIL`: Atlassian account email.
-- `BITBUCKET_API_TOKEN`: App Password with `Pull Request: Read` scope.
+- `BITBUCKET_API_TOKEN`: [API Token](https://id.atlassian.com/manage-profile/security/api-tokens) with read-only scope.
 - `BITBUCKET_WORKSPACE`: Target workspace slug.
 - `BITBUCKET_REPOSITORIES`: Comma-separated list of repository slugs (e.g., `spp-react,jeteye-backend`).
 
