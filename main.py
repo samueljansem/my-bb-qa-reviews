@@ -31,7 +31,15 @@ JIRA_ISSUE_CACHE = {}
 
 JIRA_ISSUE_KEY_REGEX = re.compile(r"[A-Z]+-\d+")
 
-DEBUG_LOG_FILE = "jira_api_debug.log"
+DEBUG_MODE = os.getenv("DEBUG", "").lower() in {"1", "true", "yes"}
+DEBUG_LOG_FILE = os.getenv("DEBUG_LOG_FILE", "jira_api_debug.log")
+
+REPO_LIST = [r.strip() for r in BITBUCKET_REPOSITORIES.split(",") if r.strip()]
+API_BASE = "https://api.bitbucket.org/2.0"
+AUTH = HTTPBasicAuth(EMAIL, BITBUCKET_API_TOKEN)
+HEADERS = {"Accept": "application/json"}
+
+QA_REGEX = re.compile(r"(DEV )?QA", re.IGNORECASE)
 
 
 def format_qa_date(iso_date):
@@ -48,17 +56,11 @@ def format_qa_date(iso_date):
 
 def log_jira_debug(message):
     """Log Jira API debug messages to file."""
+    if not DEBUG_MODE:
+        return
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"[{timestamp}] {message}\n")
-
-
-REPO_LIST = [r.strip() for r in BITBUCKET_REPOSITORIES.split(",") if r.strip()]
-API_BASE = "https://api.bitbucket.org/2.0"
-AUTH = HTTPBasicAuth(EMAIL, BITBUCKET_API_TOKEN)
-HEADERS = {"Accept": "application/json"}
-
-QA_REGEX = re.compile(r"(DEV )?QA", re.IGNORECASE)
 
 
 def get_user_uuid(session):
@@ -142,67 +144,74 @@ def extract_jira_issue_key(pr):
 
 def get_jira_issue_type(session, issue_key):
     """Fetches issue type from Jira API. For Sub-tasks, returns the parent's type from embedded data."""
-    if not JIRA_BASE_URL or not JIRA_AUTH:
-        return None
-
-    if issue_key in JIRA_ISSUE_CACHE:
-        return JIRA_ISSUE_CACHE[issue_key]
+    if not issue_key or issue_key in JIRA_ISSUE_CACHE:
+        return JIRA_ISSUE_CACHE.get(issue_key)
 
     url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}"
     log_jira_debug(f"Request: GET {url}")
-    log_jira_debug(f"Auth: {EMAIL} (hidden token)")
 
     try:
         resp = session.get(url, auth=JIRA_AUTH, headers=JIRA_HEADERS)
-        status_code = resp.status_code
-        log_jira_debug(f"Status: {status_code}")
-
-        if status_code == 200:
-            response_data = resp.json()
-            log_jira_debug(f"Response: {response_data}")
-
-            issue_type = (
-                response_data.get("fields", {}).get("issuetype", {}).get("name", None)
-            )
-            log_jira_debug(f"Extracted Issue Type: {issue_type}")
-
-            if issue_type == "Sub-task":
-                parent = response_data.get("fields", {}).get("parent", {})
-                parent_fields = parent.get("fields", {})
-                parent_issue_type = parent_fields.get("issuetype", {}).get("name", None)
-
-                if parent_issue_type:
-                    log_jira_debug(
-                        f"Sub-task detected. Using parent type from embedded data: {parent_issue_type}"
-                    )
-                    JIRA_ISSUE_CACHE[issue_key] = parent_issue_type
-                    return parent_issue_type
-
-            JIRA_ISSUE_CACHE[issue_key] = issue_type
-            return issue_type
-        else:
-            response_text = resp.text
-            log_jira_debug(f"Response: {response_text}")
+        if resp.status_code != 200:
+            log_jira_debug(f"Response: {resp.text}")
             JIRA_ISSUE_CACHE[issue_key] = None
             return None
+
+        response_data = resp.json()
+        log_jira_debug(f"Response: {response_data}")
+
+        issue_type = (
+            response_data.get("fields", {}).get("issuetype", {}).get("name", None)
+        )
+
+        if issue_type == "Sub-task":
+            parent_fields = (
+                response_data.get("fields", {}).get("parent", {}).get("fields", {})
+            )
+            parent_issue_type = parent_fields.get("issuetype", {}).get("name", None)
+            if parent_issue_type:
+                log_jira_debug(
+                    f"Sub-task detected. Using parent type: {parent_issue_type}"
+                )
+                JIRA_ISSUE_CACHE[issue_key] = parent_issue_type
+                return parent_issue_type
+
+        JIRA_ISSUE_CACHE[issue_key] = issue_type
+        return issue_type
     except requests.exceptions.RequestException as e:
         log_jira_debug(f"Error: {e}")
         JIRA_ISSUE_CACHE[issue_key] = None
         return None
 
 
+def build_review_record(pr, repo, qa_date, jira_session):
+    """Builds a review record for a single PR."""
+    issue_key = extract_jira_issue_key(pr)
+    issue_type = (
+        get_jira_issue_type(jira_session, issue_key)
+        if jira_session and issue_key
+        else None
+    )
+    return {
+        "Repository": repo,
+        "PR ID": pr["id"],
+        "Issue Key": issue_key or "",
+        "Issue Type": issue_type or "",
+        "Title": pr["title"],
+        "URL": pr["links"]["html"]["href"],
+        "QA Date": format_qa_date(qa_date),
+    }
+
+
 def main():
     log_jira_debug("=== Jira API Debug Log Started ===")
-    log_jira_debug(f"JIRA_BASE_URL: {JIRA_BASE_URL}")
-    log_jira_debug(f"JIRA_AUTH configured: {bool(JIRA_AUTH)}")
 
     session = requests.Session()
     session.auth = AUTH
     session.headers.update(HEADERS)
 
-    jira_session = None
-    if JIRA_AUTH:
-        jira_session = requests.Session()
+    jira_session = requests.Session() if JIRA_AUTH else None
+    if jira_session:
         jira_session.auth = JIRA_AUTH
         jira_session.headers.update(JIRA_HEADERS)
 
@@ -223,27 +232,9 @@ def main():
 
         for pr in prs:
             pr_id = pr["id"]
-            qa_date = find_qa_comment(session, repo, pr_id, user_uuid)
-
-            if qa_date:
+            if qa_date := find_qa_comment(session, repo, pr_id, user_uuid):
                 print(f"  [MATCH] PR #{pr_id}: {pr['title']}")
-                issue_key = extract_jira_issue_key(pr)
-                issue_type = (
-                    get_jira_issue_type(jira_session, issue_key)
-                    if jira_session
-                    else None
-                )
-                results.append(
-                    {
-                        "Repository": repo,
-                        "PR ID": pr_id,
-                        "Issue Key": issue_key or "",
-                        "Issue Type": issue_type or "",
-                        "Title": pr["title"],
-                        "URL": pr["links"]["html"]["href"],
-                        "QA Date": format_qa_date(qa_date),
-                    }
-                )
+                results.append(build_review_record(pr, repo, qa_date, jira_session))
 
     output_file = "qa_reviews_report.csv"
     if results:

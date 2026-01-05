@@ -6,6 +6,14 @@ Identify and report all Pull Requests across specified repositories where the au
 
 ## Prerequisites
 
+**Python:** Requires Python 3.11+
+
+**Installation:** Uses [uv](https://docs.astral.sh/uv/) for dependency management.
+
+```bash
+uv sync
+```
+
 Environment variables must be configured:
 
 - `BITBUCKET_EMAIL`: Atlassian account email.
